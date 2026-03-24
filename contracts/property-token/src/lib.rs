@@ -99,6 +99,10 @@ mod property_token {
         last_trade_price: Mapping<TokenId, u128>,
         compliance_registry: Option<AccountId>,
         tax_records: Mapping<(AccountId, TokenId), TaxRecord>,
+        /// Optional property-management contract for operational workflows
+        property_management_contract: Option<AccountId>,
+        /// On-chain management agent per property token (tokenized property)
+        management_agent: Mapping<TokenId, AccountId>,
     }
 
     /// Token ID type alias
@@ -474,6 +478,26 @@ mod property_token {
         pub price_per_share: u128,
     }
 
+    #[ink(event)]
+    pub struct PropertyManagementContractSet {
+        #[ink(topic)]
+        pub contract: Option<AccountId>,
+    }
+
+    #[ink(event)]
+    pub struct ManagementAgentAssigned {
+        #[ink(topic)]
+        pub token_id: TokenId,
+        #[ink(topic)]
+        pub agent: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct ManagementAgentCleared {
+        #[ink(topic)]
+        pub token_id: TokenId,
+    }
+
     impl PropertyToken {
         /// Creates a new PropertyToken contract
         #[ink(constructor)]
@@ -543,6 +567,8 @@ mod property_token {
                 last_trade_price: Mapping::default(),
                 compliance_registry: None,
                 tax_records: Mapping::default(),
+                property_management_contract: None,
+                management_agent: Mapping::default(),
             }
         }
 
@@ -786,6 +812,61 @@ mod property_token {
             }
             self.compliance_registry = Some(registry);
             Ok(())
+        }
+
+        /// Links the canonical property-management contract (admin).
+        #[ink(message)]
+        pub fn set_property_management_contract(
+            &mut self,
+            management: Option<AccountId>,
+        ) -> Result<(), Error> {
+            if self.env().caller() != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            self.property_management_contract = management;
+            self.env().emit_event(PropertyManagementContractSet {
+                contract: management,
+            });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_property_management_contract(&self) -> Option<AccountId> {
+            self.property_management_contract
+        }
+
+        /// Assigns a management agent for rent, maintenance, and tenant workflows for this token.
+        #[ink(message)]
+        pub fn assign_management_agent(
+            &mut self,
+            token_id: TokenId,
+            agent: AccountId,
+        ) -> Result<(), Error> {
+            let caller = self.env().caller();
+            let owner = self.token_owner.get(token_id).ok_or(Error::TokenNotFound)?;
+            if caller != self.admin && caller != owner {
+                return Err(Error::Unauthorized);
+            }
+            self.management_agent.insert(token_id, &agent);
+            self.env().emit_event(ManagementAgentAssigned { token_id, agent });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn clear_management_agent(&mut self, token_id: TokenId) -> Result<(), Error> {
+            let caller = self.env().caller();
+            let owner = self.token_owner.get(token_id).ok_or(Error::TokenNotFound)?;
+            if caller != self.admin && caller != owner {
+                return Err(Error::Unauthorized);
+            }
+            self.management_agent.remove(token_id);
+            self.env().emit_event(ManagementAgentCleared { token_id });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn get_management_agent(&self, token_id: TokenId) -> Option<AccountId> {
+            self.management_agent.get(token_id)
         }
 
         #[ink(message)]
@@ -2686,6 +2767,47 @@ mod property_token {
             test::set_caller::<DefaultEnvironment>(accounts.bob);
             let errors = contract.get_recent_errors(10);
             assert_eq!(errors, Vec::new());
+        }
+
+        #[ink::test]
+        fn test_property_management_linkage() {
+            let mut contract = setup_contract();
+            let accounts = test::default_accounts::<DefaultEnvironment>();
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+
+            let metadata = PropertyMetadata {
+                location: String::from("123 Main St"),
+                size: 1000,
+                legal_description: String::from("Sample property"),
+                valuation: 500000,
+                documents_url: String::from("ipfs://sample-docs"),
+            };
+            let token_id = contract
+                .register_property_with_token(metadata)
+                .expect("register");
+
+            test::set_caller::<DefaultEnvironment>(contract.admin());
+            contract
+                .set_property_management_contract(Some(accounts.charlie))
+                .expect("set pm contract");
+            assert_eq!(
+                contract.get_property_management_contract(),
+                Some(accounts.charlie)
+            );
+
+            test::set_caller::<DefaultEnvironment>(accounts.alice);
+            contract
+                .assign_management_agent(token_id, accounts.bob)
+                .expect("agent");
+            assert_eq!(
+                contract.get_management_agent(token_id),
+                Some(accounts.bob)
+            );
+
+            contract
+                .clear_management_agent(token_id)
+                .expect("clear");
+            assert_eq!(contract.get_management_agent(token_id), None);
         }
     }
 }
