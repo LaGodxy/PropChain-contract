@@ -1,10 +1,13 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
 pub mod errors;
+pub mod access_control;
 
 pub use errors::*;
 use ink::prelude::string::String;
 use ink::primitives::AccountId;
+pub use errors::*;
+pub use access_control::*;
 
 /// Error types for the Property Valuation Oracle
 #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
