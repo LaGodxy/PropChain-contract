@@ -18,6 +18,8 @@ members = [
     "contracts/metadata",
     "contracts/database",
     "contracts/third-party",
+    "contracts/staking",
+    "contracts/governance",
 ]
 resolver = "2"
 
