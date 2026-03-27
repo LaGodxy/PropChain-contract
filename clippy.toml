@@ -1,6 +1,7 @@
 # Clippy configuration for PropChain smart contracts
+# Reviewed: March 2026 — see docs/code-style-guide.md for threshold rationale.
 # Lint configuration
-msrv = "1.70.0"
+msrv = "1.75.0"
 
 # Enable additional lints
 cognitive-complexity-threshold = 30
@@ -21,8 +22,8 @@ missing-docs-in-crate-items = false
 # Metadatas configuration
 avoid-breaking-exported-api = true
 
-# Disallowed methods
-disallowed-names = ["foo", "bar", "baz", "qux"]
+# Placeholder names are banned — use descriptive identifiers.
+disallowed-names = ["foo", "bar", "baz", "qux", "tmp", "temp"]
 
 # Enforced naming conventions
 enforced-import-renames = []
@@ -51,8 +52,8 @@ literal-representation-threshold = 20
 # format-push-str = "allow"
 # format-use-stderr = "allow"
 
-# Unsafe configuration
-# unsafe-code = "deny"
+# Unsafe configuration — unsafe blocks are forbidden in contract code.
+# unsafe-code = "deny"  # enforced via deny(unsafe_code) attribute in contract lib.rs
 
 # Test configuration
 allow-expect-in-tests = true

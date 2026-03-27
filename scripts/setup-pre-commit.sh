@@ -93,7 +93,19 @@ install_dependencies() {
         pip3 install mdformat || pip install mdformat
         pip3 install mdformat-gfm mdformat-tables || pip install mdformat-gfm mdformat-tables
     fi
-    
+
+    # Install cargo-audit (dependency CVE scanner)
+    if ! command_exists cargo-audit; then
+        log_info "Installing cargo-audit..."
+        cargo install cargo-audit --locked
+    fi
+
+    # Install cargo-deny (license and dependency policy)
+    if ! command_exists cargo-deny; then
+        log_info "Installing cargo-deny..."
+        cargo install cargo-deny --locked
+    fi
+
     log_success "Dependencies installed"
 }
 

@@ -2,14 +2,16 @@
 
 Thank you for your interest in contributing to PropChain Smart Contracts! This guide will help you get started with contributing to our Rust-based smart contract system.
 
+> **Documentation Version**: 2.0.0 — Updated March 2026
+
 ## 🚀 Getting Started
 
 ### Prerequisites
 
 Before you start contributing, make sure you have:
 
-- **Rust** 1.70+ installed with stable toolchain
-- **cargo-contract** CLI for ink! smart contract development
+- **Rust** 1.75+ installed with stable toolchain (pinned in `rust-toolchain.toml`)
+- **cargo-contract** 3.x CLI for ink! smart contract development
 - **Git** for version control
 - Basic understanding of **Rust** and **ink!** framework
 - Familiarity with **Substrate/Polkadot** ecosystem
@@ -27,19 +29,25 @@ Before you start contributing, make sure you have:
    ```bash
    # Install Rust (if not already installed)
    curl https://sh.rustup.rs -sSf | sh
-   
+
    # Install cargo-contract
-   cargo install cargo-contract --locked
-   
+   cargo install cargo-contract --locked --version "^3"
+
    # Add WASM target
    rustup target add wasm32-unknown-unknown
+
+   # Optional: dependency auditing tools
+   cargo install cargo-deny cargo-audit
    ```
 
 3. **Set up your development environment**
    ```bash
+   # Install pre-commit hooks (required — see Code Style section)
+   ./scripts/setup-pre-commit.sh
+
    # Build the contracts
    cargo contract build
-   
+
    # Run tests to ensure everything works
    cargo test
    ```
@@ -127,11 +135,29 @@ git push origin feature/your-feature-name
 
 ## 📝 Code Style Guidelines
 
+See [docs/code-style-guide.md](docs/code-style-guide.md) for the full reference. The highlights are:
+
+### Automated Enforcement
+
+All style checks run automatically via pre-commit hooks (installed by `./scripts/setup-pre-commit.sh`).  
+You can also run them manually:
+
+```bash
+# Format
+cargo fmt
+
+# Lint (zero warnings policy)
+cargo clippy -- -D warnings
+
+# Run all pre-commit checks
+pre-commit run --all-files
+```
+
 ### Rust Standards
 - Follow [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
-- Use `cargo fmt` for consistent formatting
-- Run `cargo clippy` and fix all warnings
-- Prefer `unwrap()` only when you're certain it won't panic
+- `rustfmt.toml` enforces formatting — never work around it
+- `clippy.toml` enforces lint thresholds — fix warnings, don't silence them with `#[allow]` without a comment justifying why
+- Prefer `unwrap()` only inside `#[cfg(test)]` blocks
 
 ### ink! Smart Contract Best Practices
 - Keep contract logic simple and gas-efficient
@@ -219,30 +245,45 @@ mod tests {
 ### Before Submitting
 - [ ] All tests pass (`cargo test`)
 - [ ] Code is formatted (`cargo fmt`)
-- [ ] No clippy warnings (`cargo clippy`)
-- [ ] Documentation is updated
-- [ ] CHANGELOG.md is updated (if applicable)
+- [ ] No clippy warnings (`cargo clippy -- -D warnings`)
+- [ ] Pre-commit hooks pass (`pre-commit run --all-files`)
+- [ ] Documentation updated for any changed behaviour (see [Documentation Guidelines](#-documentation-guidelines))
+- [ ] `CHANGELOG.md` updated (if applicable)
+- [ ] `cargo audit` passes — no new CVEs (`cargo audit --deny warnings`)
+- [ ] `cargo deny check` passes
 
 ### PR Description
 Your PR should include:
-- **Title**: Clear and descriptive
+- **Title**: Clear and descriptive (Conventional Commits format: `feat:`, `fix:`, `docs:`, etc.)
 - **Description**: What changes were made and why
 - **Testing**: How you tested the changes
-- **Screenshots**: If UI changes are involved
 - **Breaking Changes**: Clearly highlight any breaking changes
+- **Documentation**: Links to updated docs
 
 ### Review Process
-1. **Automated Checks**: CI/CD pipeline runs tests and linting
-2. **Peer Review**: At least one maintainer must review
-3. **Security Review**: For sensitive changes
-4. **Approval**: Merge after all requirements are met
+1. **Automated Checks**: CI pipeline runs tests, linting, security scan, and cargo-audit
+2. **Peer Review**: At least one maintainer must review and approve
+3. **Security Review**: Add `security-review` label for changes to auth, crypto, or cross-contract calls
+4. **Approval**: Merge after all checks pass and approval is given
 
 ## 🔒 Security Considerations
 
 - Never commit private keys or sensitive data
-- Follow secure coding practices for smart contracts
+- Follow secure coding practices for smart contracts — see [SECURITY.md](SECURITY.md)
 - Consider gas optimization and DoS protection
-- Report security vulnerabilities privately
+- Report security vulnerabilities privately via the process in [SECURITY.md](SECURITY.md)
+
+## 📚 Documentation Guidelines
+
+Documentation must stay in sync with code changes. When you submit a PR:
+
+1. **Update docs**: If you change contract behaviour, update the corresponding file in `docs/`.
+2. **New features**: Create or update `docs/` coverage. All public `#[ink(message)]` functions must have rustdoc.
+3. **Version the doc**: Bump the `> **Documentation Version**` header in any doc file you edit.
+4. **Architecture decisions**: If your change affects system design, add an ADR in `docs/adr/`.
+5. **Tutorials**: If you add a major new capability, add a tutorial in `docs/tutorials/`.
+
+See [docs/documentation-maintenance.md](docs/documentation-maintenance.md) for the full process.
 
 ## 📚 Resources
 
@@ -250,6 +291,7 @@ Your PR should include:
 - [ink! Documentation](https://use.ink/)
 - [Substrate Documentation](https://substrate.io/)
 - [Rust Book](https://doc.rust-lang.org/book/)
+- [Code Style Guide](docs/code-style-guide.md)
 
 ### Community
 - [Polkadot Discord](https://discord.gg/polkadot)

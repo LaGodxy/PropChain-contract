@@ -1,5 +1,7 @@
 # PropChain Pre-commit Configuration
-# This file configures pre-commit hooks for code quality and consistency
+# This file configures pre-commit hooks for code quality and consistency.
+# See docs/code-style-guide.md for the rationale behind each hook.
+# To install: ./scripts/setup-pre-commit.sh
 
 repos:
   # Rust formatting and linting
@@ -100,6 +102,20 @@ repos:
         entry: cargo doc
         language: system
         args: [--no-deps, --document-private-items]
+        pass_filenames: false
+
+      - id: cargo-audit
+        name: cargo audit (dependency CVEs)
+        entry: cargo audit
+        language: system
+        args: [--deny, warnings]
+        pass_filenames: false
+
+      - id: cargo-deny
+        name: cargo deny (license & dependency policy)
+        entry: cargo deny
+        language: system
+        args: [check]
         pass_filenames: false
 
 # Configuration for specific hooks
