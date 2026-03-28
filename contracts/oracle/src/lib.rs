@@ -73,6 +73,8 @@ mod propchain_oracle {
 
         /// AI valuation contract address
         ai_valuation_contract: Option<AccountId>,
+        /// Maximum batch size for batch operations
+        max_batch_size: u32,
     }
 
     /// Events emitted by the oracle
@@ -101,6 +103,27 @@ mod propchain_oracle {
         source_id: String,
         source_type: OracleSourceType,
         weight: u32,
+    }
+
+    /// Result of an oracle batch operation
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct OracleBatchResult {
+        pub successes: Vec<u64>,
+        pub failures: Vec<OracleBatchItemFailure>,
+        pub total_items: u32,
+        pub successful_items: u32,
+        pub failed_items: u32,
+        pub early_terminated: bool,
+    }
+
+    /// A single item failure in an oracle batch operation
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct OracleBatchItemFailure {
+        pub index: u32,
+        pub item_id: u64,
+        pub error: OracleError,
     }
 
     impl PropertyValuationOracle {
@@ -141,6 +164,7 @@ mod propchain_oracle {
                 pending_requests: Mapping::default(),
                 request_id_counter: 0,
                 ai_valuation_contract: None,
+                max_batch_size: 50,
             }
         }
 
@@ -266,14 +290,54 @@ mod propchain_oracle {
         pub fn batch_request_valuations(
             &mut self,
             property_ids: Vec<u64>,
-        ) -> Result<Vec<u64>, OracleError> {
-            let mut request_ids = Vec::new();
-            for id in property_ids {
-                if let Ok(req_id) = self.request_property_valuation(id) {
-                    request_ids.push(req_id);
+        ) -> Result<OracleBatchResult, OracleError> {
+            self.batch_request_valuations_internal(property_ids)
+        }
+
+        /// Internal implementation of batch request valuations
+        fn batch_request_valuations_internal(
+            &mut self,
+            property_ids: Vec<u64>,
+        ) -> Result<OracleBatchResult, OracleError> {
+            if property_ids.len() > self.max_batch_size as usize {
+                return Err(OracleError::BatchSizeExceeded);
+            }
+
+            let total_items = property_ids.len() as u32;
+            let mut successes = Vec::new();
+            let mut failures = Vec::new();
+            let mut early_terminated = false;
+            let failure_threshold: usize = 5;
+
+            for (i, id) in property_ids.into_iter().enumerate() {
+                if failures.len() >= failure_threshold {
+                    early_terminated = true;
+                    break;
+                }
+
+                match self.request_property_valuation(id) {
+                    Ok(req_id) => successes.push(req_id),
+                    Err(e) => {
+                        failures.push(OracleBatchItemFailure {
+                            index: i as u32,
+                            item_id: id,
+                            error: e,
+                        });
+                    }
                 }
             }
-            Ok(request_ids)
+
+            let successful_items = successes.len() as u32;
+            let failed_items = failures.len() as u32;
+
+            Ok(OracleBatchResult {
+                successes,
+                failures,
+                total_items,
+                successful_items,
+                failed_items,
+                early_terminated,
+            })
         }
 
         /// Update oracle reputation (admin only)
@@ -888,7 +952,8 @@ mod propchain_oracle {
             &mut self,
             property_ids: Vec<u64>,
         ) -> Result<Vec<u64>, OracleError> {
-            self.batch_request_valuations(property_ids)
+            let result = self.batch_request_valuations_internal(property_ids)?;
+            Ok(result.successes)
         }
 
         #[ink(message)]
@@ -1347,12 +1412,9 @@ mod oracle_tests {
     #[ink::test]
     fn test_batch_request_works() {
         let mut oracle = setup_oracle();
-        let property_ids = vec![1, 2, 3];
-
-        let result = oracle.batch_request_valuations(property_ids);
-        assert!(result.is_ok());
-        let request_ids = result.expect("Batch request should succeed in test");
-        assert_eq!(request_ids.len(), 3);
+        let result = oracle.batch_request_valuations(vec![1, 2, 3]).unwrap();
+        assert_eq!(result.successes.len(), 3);
+        assert!(result.failures.is_empty());
 
         assert!(oracle.pending_requests.get(&1).is_some());
         assert!(oracle.pending_requests.get(&2).is_some());

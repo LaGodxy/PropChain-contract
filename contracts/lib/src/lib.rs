@@ -19,7 +19,7 @@ mod propchain_contracts {
     use super::*;
 
     /// Error types for contract
-    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
         /// Property does not exist in the registry
@@ -68,6 +68,8 @@ mod propchain_contracts {
         AlreadyApproved,
         /// Caller is not authorized to pause the contract
         NotAuthorizedToPause,
+        /// Input batch exceeds the configured max_batch_size
+        BatchSizeExceeded,
     }
 
     /// Property Registry contract
@@ -119,6 +121,10 @@ mod propchain_contracts {
         fractional: Mapping<u64, FractionalInfo>,
         /// Centralized RBAC and permission audit state
         access_control: AccessControl,
+        /// Batch operation configuration
+        batch_config: BatchConfig,
+        /// Batch operation statistics
+        batch_operation_stats: BatchOperationStats,
     }
 
     /// Escrow information
@@ -244,6 +250,75 @@ mod propchain_contracts {
         pub last_operation_gas: u64,
         pub min_gas_used: u64,
         pub max_gas_used: u64,
+    }
+
+    /// Configuration for batch operations
+    #[derive(
+        Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchConfig {
+        /// Maximum number of items in a single batch call.
+        pub max_batch_size: u32,
+        /// Stop processing after this many failures.
+        pub max_failure_threshold: u32,
+    }
+
+    impl Default for BatchConfig {
+        fn default() -> Self {
+            Self {
+                max_batch_size: 50,
+                max_failure_threshold: 5,
+            }
+        }
+    }
+
+    /// Result of a batch operation with partial success support
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchResult {
+        /// Successfully processed item IDs.
+        pub successes: Vec<u64>,
+        /// Per-item failures with index, item ID, and error.
+        pub failures: Vec<BatchItemFailure>,
+        /// Batch performance metrics.
+        pub metrics: BatchMetrics,
+    }
+
+    /// A single item failure within a batch operation
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchItemFailure {
+        /// Position in the input array.
+        pub index: u32,
+        /// Property ID that failed (0 if not yet assigned).
+        pub item_id: u64,
+        /// The specific error that occurred.
+        pub error: Error,
+    }
+
+    /// Metrics for a single batch operation call
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchMetrics {
+        pub total_items: u32,
+        pub successful_items: u32,
+        pub failed_items: u32,
+        /// True if processing stopped due to failure threshold.
+        pub early_terminated: bool,
+    }
+
+    /// Historical batch operation statistics (stored on-chain)
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Default, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchOperationStats {
+        pub total_batches_processed: u64,
+        pub total_items_processed: u64,
+        pub total_items_failed: u64,
+        pub total_early_terminations: u64,
+        pub largest_batch_processed: u32,
     }
 
     /// Badge types for property verification
@@ -617,6 +692,24 @@ mod propchain_contracts {
         transferred_by: AccountId,
     }
 
+    /// Event emitted after every batch operation for monitoring
+    #[ink(event)]
+    pub struct BatchOperationCompleted {
+        /// 0=register, 1=transfer, 2=metadata_update, 3=transfer_multiple
+        operation_code: u8,
+        #[ink(topic)]
+        caller: AccountId,
+        #[ink(topic)]
+        event_version: u8,
+        total_items: u32,
+        successful_items: u32,
+        failed_items: u32,
+        early_terminated: bool,
+        timestamp: u64,
+        block_number: u32,
+        transaction_hash: Hash,
+    }
+
     /// Event emitted when a badge is issued to a property
     #[ink(event)]
     pub struct BadgeIssued {
@@ -907,6 +1000,8 @@ mod propchain_contracts {
                         ac.grant_role(caller, caller, Role::PauseGuardian, block_number, timestamp);
                     ac
                 },
+                batch_config: BatchConfig::default(),
+                batch_operation_stats: BatchOperationStats::default(),
             };
 
             // Emit contract initialization event
@@ -1663,55 +1758,84 @@ mod propchain_contracts {
         pub fn batch_register_properties(
             &mut self,
             properties: Vec<PropertyMetadata>,
-        ) -> Result<Vec<u64>, Error> {
+        ) -> Result<BatchResult, Error> {
             self.ensure_not_paused()?;
-            let mut results = Vec::new();
+            self.validate_batch_size(properties.len())?;
+
             let caller = self.env().caller();
+            let timestamp = self.env().block_timestamp();
+            let total_items = properties.len() as u32;
+            let mut successes = Vec::new();
+            let mut failures = Vec::new();
+            let mut early_terminated = false;
+            let mut next_id = self.property_count + 1;
 
-            // Pre-calculate all property IDs to avoid repeated storage reads
-            let start_id = self.property_count + 1;
-            let end_id = start_id + properties.len() as u64 - 1;
-            self.property_count = end_id;
-
-            // Get existing owner properties to avoid repeated storage reads
             let mut owner_props = self.owner_properties.get(caller).unwrap_or_default();
 
             for (i, metadata) in properties.into_iter().enumerate() {
-                let property_id = start_id + i as u64;
+                // Check early termination
+                if failures.len() >= self.batch_config.max_failure_threshold as usize {
+                    early_terminated = true;
+                    break;
+                }
+
+                // Validate metadata
+                if metadata.location.is_empty() {
+                    failures.push(BatchItemFailure {
+                        index: i as u32,
+                        item_id: 0,
+                        error: Error::InvalidMetadata,
+                    });
+                    continue;
+                }
+
+                let property_id = next_id;
+                next_id += 1;
 
                 let property_info = PropertyInfo {
                     id: property_id,
                     owner: caller,
                     metadata,
-                    registered_at: self.env().block_timestamp(),
+                    registered_at: timestamp,
                 };
 
                 self.properties.insert(property_id, &property_info);
                 owner_props.push(property_id);
-
-                results.push(property_id);
+                successes.push(property_id);
             }
 
-            // Update owner properties once at the end
-            self.owner_properties.insert(caller, &owner_props);
+            // Update property count only if there were successes
+            if !successes.is_empty() {
+                self.property_count = next_id - 1;
+                self.owner_properties.insert(caller, &owner_props);
 
-            // Emit enhanced batch registration event
+                let transaction_hash: Hash = [0u8; 32].into();
+                self.env().emit_event(BatchPropertyRegistered {
+                    owner: caller,
+                    event_version: 1,
+                    property_ids: successes.clone(),
+                    count: successes.len() as u64,
+                    timestamp,
+                    block_number: self.env().block_number(),
+                    transaction_hash,
+                });
+            }
 
-            let transaction_hash: Hash = [0u8; 32].into();
-            self.env().emit_event(BatchPropertyRegistered {
-                owner: caller,
-                event_version: 1,
-                property_ids: results.clone(),
-                count: results.len() as u64,
-                timestamp: self.env().block_timestamp(),
-                block_number: self.env().block_number(),
-                transaction_hash,
-            });
+            let metrics = BatchMetrics {
+                total_items,
+                successful_items: successes.len() as u32,
+                failed_items: failures.len() as u32,
+                early_terminated,
+            };
 
-            // Track gas usage
+            self.record_batch_operation(0, &metrics);
             self.track_gas_usage("batch_register_properties".as_bytes());
 
-            Ok(results)
+            Ok(BatchResult {
+                successes,
+                failures,
+                metrics,
+            })
         }
 
         /// Batch transfers multiple properties to the same recipient
@@ -1722,9 +1846,15 @@ mod propchain_contracts {
             to: AccountId,
         ) -> Result<(), Error> {
             self.ensure_not_paused()?;
+            self.validate_batch_size(property_ids.len())?;
+
+            if property_ids.is_empty() {
+                return Ok(());
+            }
+
             let caller = self.env().caller();
 
-            // Validate all properties first to avoid partial transfers
+            // Phase 1: Validate all properties (atomic — fail on first error)
             for &property_id in &property_ids {
                 let property = self
                     .properties
@@ -1737,64 +1867,59 @@ mod propchain_contracts {
                 }
             }
 
-            // Capture the original owner before transfers (fix for bug)
-            let from = if !property_ids.is_empty() {
-                let first_property = self
-                    .properties
-                    .get(property_ids[0])
-                    .ok_or(Error::PropertyNotFound)?;
-                first_property.owner
-            } else {
-                return Ok(()); // No properties to transfer
-            };
+            // Capture the original owner
+            let from = self
+                .properties
+                .get(property_ids[0])
+                .ok_or(Error::PropertyNotFound)?
+                .owner;
 
-            // Perform all transfers
-            for property_id in &property_ids {
+            // Phase 2: Optimized execution — batch storage reads/writes per owner
+            // Read owner_properties for `from` once, remove all in one pass
+            let mut from_props = self.owner_properties.get(from).unwrap_or_default();
+            from_props.retain(|id| !property_ids.contains(id));
+            self.owner_properties.insert(from, &from_props);
+
+            // Accumulate `to` owner additions, write once
+            let mut to_props = self.owner_properties.get(to).unwrap_or_default();
+
+            for &property_id in &property_ids {
                 let mut property = self
                     .properties
                     .get(property_id)
                     .ok_or(Error::PropertyNotFound)?;
-                let current_from = property.owner;
 
-                // Remove from current owner's properties
-                let mut current_owner_props =
-                    self.owner_properties.get(current_from).unwrap_or_default();
-                current_owner_props.retain(|&id| id != *property_id);
-                self.owner_properties
-                    .insert(current_from, &current_owner_props);
-
-                // Add to new owner's properties
-                let mut new_owner_props = self.owner_properties.get(to).unwrap_or_default();
-                new_owner_props.push(*property_id);
-                self.owner_properties.insert(to, &new_owner_props);
-
-                // Update property owner
                 property.owner = to;
                 self.properties.insert(property_id, &property);
-                // Optimized: Update reverse mapping
                 self.property_owners.insert(property_id, &to);
-
-                // Clear approval
                 self.approvals.remove(property_id);
+                to_props.push(property_id);
             }
 
-            // Emit enhanced batch transfer event
-            if !property_ids.is_empty() {
-                let transaction_hash: Hash = [0u8; 32].into();
-                self.env().emit_event(BatchPropertyTransferred {
-                    from,
-                    to,
-                    event_version: 1,
-                    property_ids: property_ids.clone(),
-                    count: property_ids.len() as u64,
-                    timestamp: self.env().block_timestamp(),
-                    block_number: self.env().block_number(),
-                    transaction_hash,
-                    transferred_by: caller,
-                });
-            }
+            // Single write for `to` owner properties
+            self.owner_properties.insert(to, &to_props);
 
-            // Track gas usage
+            // Emit events
+            let transaction_hash: Hash = [0u8; 32].into();
+            self.env().emit_event(BatchPropertyTransferred {
+                from,
+                to,
+                event_version: 1,
+                property_ids: property_ids.clone(),
+                count: property_ids.len() as u64,
+                timestamp: self.env().block_timestamp(),
+                block_number: self.env().block_number(),
+                transaction_hash,
+                transferred_by: caller,
+            });
+
+            let metrics = BatchMetrics {
+                total_items: property_ids.len() as u32,
+                successful_items: property_ids.len() as u32,
+                failed_items: 0,
+                early_terminated: false,
+            };
+            self.record_batch_operation(1, &metrics);
             self.track_gas_usage("batch_transfer_properties".as_bytes());
 
             Ok(())
@@ -1805,60 +1930,91 @@ mod propchain_contracts {
         pub fn batch_update_metadata(
             &mut self,
             updates: Vec<(u64, PropertyMetadata)>,
-        ) -> Result<(), Error> {
+        ) -> Result<BatchResult, Error> {
             self.ensure_not_paused()?;
+            self.validate_batch_size(updates.len())?;
+
             let caller = self.env().caller();
+            let total_items = updates.len() as u32;
+            let mut successes = Vec::new();
+            let mut failures = Vec::new();
+            let mut early_terminated = false;
 
-            // Validate all properties first to avoid partial updates
-            for (property_id, ref metadata) in &updates {
-                let property = self
-                    .properties
-                    .get(property_id)
-                    .ok_or(Error::PropertyNotFound)?;
+            for (i, (property_id, metadata)) in updates.into_iter().enumerate() {
+                if failures.len() >= self.batch_config.max_failure_threshold as usize {
+                    early_terminated = true;
+                    break;
+                }
 
+                // Validate property exists
+                let property = match self.properties.get(property_id) {
+                    Some(p) => p,
+                    None => {
+                        failures.push(BatchItemFailure {
+                            index: i as u32,
+                            item_id: property_id,
+                            error: Error::PropertyNotFound,
+                        });
+                        continue;
+                    }
+                };
+
+                // Validate ownership
                 if property.owner != caller {
-                    return Err(Error::Unauthorized);
+                    failures.push(BatchItemFailure {
+                        index: i as u32,
+                        item_id: property_id,
+                        error: Error::Unauthorized,
+                    });
+                    continue;
                 }
 
-                // Check if metadata is valid (basic check)
+                // Validate metadata
                 if metadata.location.is_empty() {
-                    return Err(Error::InvalidMetadata);
+                    failures.push(BatchItemFailure {
+                        index: i as u32,
+                        item_id: property_id,
+                        error: Error::InvalidMetadata,
+                    });
+                    continue;
                 }
-            }
 
-            // Perform all updates
-            let mut updated_property_ids = Vec::new();
-            for (property_id, metadata) in updates {
-                let mut property = self
-                    .properties
-                    .get(property_id)
-                    .ok_or(Error::PropertyNotFound)?;
-
-                property.metadata = metadata.clone();
+                // Apply update
+                let mut property = property;
+                property.metadata = metadata;
                 self.properties.insert(property_id, &property);
-                updated_property_ids.push(property_id);
+                successes.push(property_id);
             }
 
-            // Emit enhanced batch metadata update event
-            if !updated_property_ids.is_empty() {
-                let count = updated_property_ids.len() as u64;
-
+            // Emit existing batch event for successes
+            if !successes.is_empty() {
                 let transaction_hash: Hash = [0u8; 32].into();
                 self.env().emit_event(BatchMetadataUpdated {
                     owner: caller,
                     event_version: 1,
-                    property_ids: updated_property_ids,
-                    count,
+                    property_ids: successes.clone(),
+                    count: successes.len() as u64,
                     timestamp: self.env().block_timestamp(),
                     block_number: self.env().block_number(),
                     transaction_hash,
                 });
             }
 
-            // Track gas usage
+            let metrics = BatchMetrics {
+                total_items,
+                successful_items: successes.len() as u32,
+                failed_items: failures.len() as u32,
+                early_terminated,
+            };
+
+            self.record_batch_operation(2, &metrics);
             self.track_gas_usage("batch_update_metadata".as_bytes());
 
-            Ok(())
+            Ok(BatchResult {
+                successes,
+                failures,
+                metrics,
+            })
         }
 
         /// Transfers multiple properties to different recipients
@@ -1868,9 +2024,15 @@ mod propchain_contracts {
             transfers: Vec<(u64, AccountId)>,
         ) -> Result<(), Error> {
             self.ensure_not_paused()?;
+            self.validate_batch_size(transfers.len())?;
+
+            if transfers.is_empty() {
+                return Ok(());
+            }
+
             let caller = self.env().caller();
 
-            // Validate all properties first to avoid partial transfers
+            // Phase 1: Validate all transfers (atomic)
             for (property_id, _) in &transfers {
                 let property = self
                     .properties
@@ -1883,58 +2045,63 @@ mod propchain_contracts {
                 }
             }
 
-            // Perform all transfers
-            let mut transferred_property_ids = Vec::new();
+            // Phase 2: Group by from-owner and to-owner for batched writes
+            let transfer_ids: Vec<u64> = transfers.iter().map(|(id, _)| *id).collect();
+
+            // Remove all transferred properties from caller's list in one pass
+            let mut from_props = self.owner_properties.get(caller).unwrap_or_default();
+            from_props.retain(|id| !transfer_ids.contains(id));
+            self.owner_properties.insert(caller, &from_props);
+
+            // Group additions by recipient to minimize writes
+            let mut recipient_additions: Vec<(AccountId, Vec<u64>)> = Vec::new();
+
             for (property_id, to) in &transfers {
                 let mut property = self
                     .properties
                     .get(property_id)
                     .ok_or(Error::PropertyNotFound)?;
-                let from = property.owner;
 
-                // Remove from current owner's properties
-                let mut current_owner_props = self.owner_properties.get(from).unwrap_or_default();
-                current_owner_props.retain(|&id| id != *property_id);
-                self.owner_properties.insert(from, &current_owner_props);
-
-                // Add to new owner's properties
-                let mut new_owner_props = self.owner_properties.get(to).unwrap_or_default();
-                new_owner_props.push(*property_id);
-                self.owner_properties.insert(to, &new_owner_props);
-
-                // Update property owner
                 property.owner = *to;
                 self.properties.insert(property_id, &property);
-                // Optimized: Update reverse mapping
                 self.property_owners.insert(property_id, to);
-
-                // Clear approval
                 self.approvals.remove(property_id);
-                transferred_property_ids.push(*property_id);
+
+                // Accumulate by recipient
+                if let Some(entry) = recipient_additions.iter_mut().find(|(addr, _)| addr == to) {
+                    entry.1.push(*property_id);
+                } else {
+                    recipient_additions.push((*to, vec![*property_id]));
+                }
             }
 
-            // Emit enhanced batch transfer to multiple recipients event
-            if !transferred_property_ids.is_empty() {
-                let first_property = self
-                    .properties
-                    .get(transferred_property_ids[0])
-                    .ok_or(Error::PropertyNotFound)?;
-                let from = first_property.owner;
-
-                let transaction_hash: Hash = [0u8; 32].into();
-                self.env().emit_event(BatchPropertyTransferredToMultiple {
-                    from,
-                    event_version: 1,
-                    transfers: transfers.clone(),
-                    count: transfers.len() as u64,
-                    timestamp: self.env().block_timestamp(),
-                    block_number: self.env().block_number(),
-                    transaction_hash,
-                    transferred_by: caller,
-                });
+            // Batch write per recipient
+            for (recipient, new_ids) in recipient_additions {
+                let mut recipient_props = self.owner_properties.get(recipient).unwrap_or_default();
+                recipient_props.extend(new_ids);
+                self.owner_properties.insert(recipient, &recipient_props);
             }
 
-            // Track gas usage
+            // Emit event
+            let transaction_hash: Hash = [0u8; 32].into();
+            self.env().emit_event(BatchPropertyTransferredToMultiple {
+                from: caller,
+                event_version: 1,
+                transfers: transfers.clone(),
+                count: transfers.len() as u64,
+                timestamp: self.env().block_timestamp(),
+                block_number: self.env().block_number(),
+                transaction_hash,
+                transferred_by: caller,
+            });
+
+            let metrics = BatchMetrics {
+                total_items: transfers.len() as u32,
+                successful_items: transfers.len() as u32,
+                failed_items: 0,
+                early_terminated: false,
+            };
+            self.record_batch_operation(3, &metrics);
             self.track_gas_usage("batch_transfer_properties_to_multiple".as_bytes());
 
             Ok(())
@@ -2298,6 +2465,45 @@ mod propchain_contracts {
             }
         }
 
+        /// Updates batch operation stats and emits monitoring event.
+        fn record_batch_operation(
+            &mut self,
+            operation_code: u8,
+            metrics: &BatchMetrics,
+        ) {
+            self.batch_operation_stats.total_batches_processed += 1;
+            self.batch_operation_stats.total_items_processed += metrics.successful_items as u64;
+            self.batch_operation_stats.total_items_failed += metrics.failed_items as u64;
+            if metrics.early_terminated {
+                self.batch_operation_stats.total_early_terminations += 1;
+            }
+            if metrics.total_items > self.batch_operation_stats.largest_batch_processed {
+                self.batch_operation_stats.largest_batch_processed = metrics.total_items;
+            }
+
+            let transaction_hash: Hash = [0u8; 32].into();
+            self.env().emit_event(BatchOperationCompleted {
+                operation_code,
+                caller: self.env().caller(),
+                event_version: 1,
+                total_items: metrics.total_items,
+                successful_items: metrics.successful_items,
+                failed_items: metrics.failed_items,
+                early_terminated: metrics.early_terminated,
+                timestamp: self.env().block_timestamp(),
+                block_number: self.env().block_number(),
+                transaction_hash,
+            });
+        }
+
+        /// Validates batch size against config. Returns Err(BatchSizeExceeded) if too large.
+        fn validate_batch_size(&self, size: usize) -> Result<(), Error> {
+            if size > self.batch_config.max_batch_size as usize {
+                return Err(Error::BatchSizeExceeded);
+            }
+            Ok(())
+        }
+
         /// Gas Monitoring: Tracks gas usage for operations
         #[ink(message)]
         pub fn get_gas_metrics(&self) -> GasMetrics {
@@ -2319,6 +2525,42 @@ mod propchain_contracts {
                 },
                 max_gas_used: self.gas_tracker.max_gas_used,
             }
+        }
+
+        /// Admin-only: update batch operation configuration.
+        #[ink(message)]
+        pub fn update_batch_config(
+            &mut self,
+            max_batch_size: u32,
+            max_failure_threshold: u32,
+        ) -> Result<(), Error> {
+            let caller = self.env().caller();
+            if caller != self.admin {
+                return Err(Error::Unauthorized);
+            }
+            if max_batch_size == 0 || max_batch_size > 200 {
+                return Err(Error::InvalidMetadata);
+            }
+            if max_failure_threshold == 0 || max_failure_threshold > max_batch_size {
+                return Err(Error::InvalidMetadata);
+            }
+            self.batch_config = BatchConfig {
+                max_batch_size,
+                max_failure_threshold,
+            };
+            Ok(())
+        }
+
+        /// Returns the current batch operation configuration.
+        #[ink(message)]
+        pub fn get_batch_config(&self) -> BatchConfig {
+            self.batch_config.clone()
+        }
+
+        /// Returns historical batch operation statistics.
+        #[ink(message)]
+        pub fn get_batch_stats(&self) -> BatchOperationStats {
+            self.batch_operation_stats.clone()
         }
 
         /// Performance Monitoring: Gets optimization recommendations
