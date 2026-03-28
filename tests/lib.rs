@@ -9,3 +9,11 @@ pub mod test_utils;
 
 // Re-export commonly used items
 pub use test_utils::*;
+
+// ── Security Test Modules ─────────────────────────────────────────────────
+pub mod security_access_control_tests;
+pub mod security_bridge_tests;
+pub mod security_compliance_tests;
+pub mod security_overflow_tests;
+pub mod security_fuzzing_tests;
+pub mod security_audit_runner;
