@@ -19,7 +19,7 @@ mod propchain_contracts {
     use super::*;
 
     /// Error types for contract
-    #[derive(Debug, PartialEq, Eq, scale::Encode, scale::Decode)]
+    #[derive(Debug, Clone, PartialEq, Eq, scale::Encode, scale::Decode)]
     #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
     pub enum Error {
         /// Property does not exist in the registry
@@ -68,6 +68,8 @@ mod propchain_contracts {
         AlreadyApproved,
         /// Caller is not authorized to pause the contract
         NotAuthorizedToPause,
+        /// Input batch exceeds the configured max_batch_size
+        BatchSizeExceeded,
     }
 
     /// Property Registry contract
@@ -119,6 +121,10 @@ mod propchain_contracts {
         fractional: Mapping<u64, FractionalInfo>,
         /// Centralized RBAC and permission audit state
         access_control: AccessControl,
+        /// Batch operation configuration
+        batch_config: BatchConfig,
+        /// Batch operation statistics
+        batch_operation_stats: BatchOperationStats,
     }
 
     /// Escrow information
@@ -244,6 +250,75 @@ mod propchain_contracts {
         pub last_operation_gas: u64,
         pub min_gas_used: u64,
         pub max_gas_used: u64,
+    }
+
+    /// Configuration for batch operations
+    #[derive(
+        Debug, Clone, PartialEq, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchConfig {
+        /// Maximum number of items in a single batch call.
+        pub max_batch_size: u32,
+        /// Stop processing after this many failures.
+        pub max_failure_threshold: u32,
+    }
+
+    impl Default for BatchConfig {
+        fn default() -> Self {
+            Self {
+                max_batch_size: 50,
+                max_failure_threshold: 5,
+            }
+        }
+    }
+
+    /// Result of a batch operation with partial success support
+    #[derive(Debug, Clone, PartialEq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchResult {
+        /// Successfully processed item IDs.
+        pub successes: Vec<u64>,
+        /// Per-item failures with index, item ID, and error.
+        pub failures: Vec<BatchItemFailure>,
+        /// Batch performance metrics.
+        pub metrics: BatchMetrics,
+    }
+
+    /// A single item failure within a batch operation
+    #[derive(Debug, Clone, PartialEq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchItemFailure {
+        /// Position in the input array.
+        pub index: u32,
+        /// Property ID that failed (0 if not yet assigned).
+        pub item_id: u64,
+        /// The specific error that occurred.
+        pub error: Error,
+    }
+
+    /// Metrics for a single batch operation call
+    #[derive(Debug, Clone, PartialEq, scale::Encode, scale::Decode)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchMetrics {
+        pub total_items: u32,
+        pub successful_items: u32,
+        pub failed_items: u32,
+        /// True if processing stopped due to failure threshold.
+        pub early_terminated: bool,
+    }
+
+    /// Historical batch operation statistics (stored on-chain)
+    #[derive(
+        Debug, Clone, PartialEq, Default, scale::Encode, scale::Decode, ink::storage::traits::StorageLayout,
+    )]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
+    pub struct BatchOperationStats {
+        pub total_batches_processed: u64,
+        pub total_items_processed: u64,
+        pub total_items_failed: u64,
+        pub total_early_terminations: u64,
+        pub largest_batch_processed: u32,
     }
 
     /// Badge types for property verification
@@ -617,6 +692,21 @@ mod propchain_contracts {
         transferred_by: AccountId,
     }
 
+    /// Event emitted after every batch operation for monitoring
+    #[ink(event)]
+    pub struct BatchOperationCompleted {
+        /// 0=register, 1=transfer, 2=metadata_update, 3=transfer_multiple
+        pub operation_code: u8,
+        #[ink(topic)]
+        pub caller: AccountId,
+        pub total_items: u32,
+        pub successful_items: u32,
+        pub failed_items: u32,
+        pub early_terminated: bool,
+        pub timestamp: u64,
+        pub block_number: u32,
+    }
+
     /// Event emitted when a badge is issued to a property
     #[ink(event)]
     pub struct BadgeIssued {
@@ -845,6 +935,8 @@ mod propchain_contracts {
                         ac.grant_role(caller, caller, Role::PauseGuardian, block_number, timestamp);
                     ac
                 },
+                batch_config: BatchConfig::default(),
+                batch_operation_stats: BatchOperationStats::default(),
             };
 
             // Emit contract initialization event
