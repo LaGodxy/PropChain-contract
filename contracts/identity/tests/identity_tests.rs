@@ -122,6 +122,9 @@ fn test_verify_identity() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
 
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+
     // First create an identity
     let did = "did:example:123456789abcdefghi".to_string();
     let public_key = vec![1u8; 32];
@@ -145,7 +148,8 @@ fn test_verify_identity() {
         Ok(())
     );
 
-    // Add alice as authorized verifier
+    // Add alice as authorized verifier (alice is admin)
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
     assert_eq!(
         identity_registry.add_authorized_verifier(accounts.alice),
         Ok(())
@@ -202,6 +206,8 @@ fn test_unauthorized_verification() {
     );
 
     // Try to verify without authorization should fail
+    // Set caller to charlie (non-admin, non-authorized)
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
     assert_eq!(
         identity_registry.verify_identity(
             accounts.bob,
@@ -216,6 +222,9 @@ fn test_unauthorized_verification() {
 fn test_update_reputation() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
+
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
 
     // Create identity
     let did = "did:example:123456789abcdefghi".to_string();
@@ -240,7 +249,8 @@ fn test_update_reputation() {
         Ok(())
     );
 
-    // Add alice as authorized verifier
+    // Add alice as authorized verifier (alice is admin)
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
     assert_eq!(
         identity_registry.add_authorized_verifier(accounts.alice),
         Ok(())
@@ -274,6 +284,9 @@ fn test_update_reputation() {
 fn test_assess_trust() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
+
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
 
     // Create identity for bob
     let did = "did:example:123456789abcdefghi".to_string();
@@ -311,6 +324,9 @@ fn test_assess_trust() {
 fn test_cross_chain_verification() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
+
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
 
     // Create identity
     let did = "did:example:123456789abcdefghi".to_string();
@@ -407,6 +423,9 @@ fn test_unsupported_chain() {
 fn test_social_recovery_initiation() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
+
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
 
     // Create identity
     let did = "did:example:123456789abcdefghi".to_string();
@@ -537,6 +556,9 @@ fn test_reputation_threshold_check() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
     let mut identity_registry = IdentityRegistry::new();
 
+    // Set caller to bob before creating identity
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
+
     // Create identity
     let did = "did:example:123456789abcdefghi".to_string();
     let public_key = vec![1u8; 32];
@@ -570,16 +592,23 @@ fn test_reputation_threshold_check() {
 #[ink::test]
 fn test_admin_functions() {
     let accounts: DefaultAccounts<ink::env::DefaultEnvironment> = default_accounts();
+    
+    // Set caller to non-admin (bob) before creating contract
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.bob);
     let mut identity_registry = IdentityRegistry::new();
 
+    // Test with charlie as non-admin caller
+    ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.charlie);
+    
     // Only admin can add authorized verifiers
     assert_eq!(
-        identity_registry.add_authorized_verifier(accounts.bob),
+        identity_registry.add_authorized_verifier(accounts.charlie),
         Err(IdentityError::Unauthorized)
     );
 
-    // Set caller as admin
+    // Set caller as admin (alice)
     ink::env::test::set_caller::<ink::env::DefaultEnvironment>(accounts.alice);
+    let mut identity_registry = IdentityRegistry::new();
 
     // Now admin can add authorized verifiers
     assert_eq!(

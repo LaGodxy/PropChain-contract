@@ -2447,7 +2447,7 @@ mod propchain_contracts {
         /// # Returns
         ///
         /// Returns `Result<u64, Error>` with the new verification request ID on success
-        #[ink(message)]
+        #[ink(message, selector = 0x4C0F_B92C)]
         pub fn request_verification(
             &mut self,
             property_id: u64,
