@@ -275,6 +275,7 @@ mod propchain_database {
 
         /// Records an analytics snapshot on-chain for later verification
         #[ink(message)]
+        #[allow(clippy::too_many_arguments)]
         pub fn record_analytics_snapshot(
             &mut self,
             total_properties: u64,
@@ -572,7 +573,6 @@ mod propchain_database {
     // ========================================================================
     // UNIT TESTS
     // ========================================================================
-
 
     // Unit tests extracted to tests.rs (Issue #101)
     include!("tests.rs");

@@ -527,7 +527,6 @@ mod propchain_third_party {
     // UNIT TESTS
     // ========================================================================
 
-
     // Unit tests extracted to tests.rs (Issue #101)
     include!("tests.rs");
 }

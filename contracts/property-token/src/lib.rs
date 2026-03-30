@@ -328,6 +328,12 @@ mod property_token {
         pub token_id: TokenId,
     }
 
+    impl Default for PropertyToken {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
     impl PropertyToken {
         /// Creates a new PropertyToken contract
         #[ink(constructor)]

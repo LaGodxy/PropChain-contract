@@ -784,7 +784,6 @@ mod propchain_proxy {
         }
     }
 
-
     // Unit tests extracted to tests.rs (Issue #101)
     include!("tests.rs");
 }
