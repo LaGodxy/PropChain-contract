@@ -1,4 +1,4 @@
-#![cfg(all(feature = "ingest", not(test)))]
+#![cfg(feature = "ingest")]
 use crate::db::Db;
 use anyhow::Context;
 use chrono::Utc;

@@ -237,7 +237,11 @@ fn sec_ac08_operations_on_nonexistent_token_return_not_found() {
         "verify_compliance on ghost token should return TokenNotFound"
     );
     assert_eq!(
-        contract.attach_legal_document(ghost_token_id, ink::primitives::Hash::from([0u8; 32]), String::from("Deed")),
+        contract.attach_legal_document(
+            ghost_token_id,
+            ink::primitives::Hash::from([0u8; 32]),
+            String::from("Deed")
+        ),
         Err(Error::TokenNotFound),
         "attach_legal_document on ghost token should return TokenNotFound"
     );

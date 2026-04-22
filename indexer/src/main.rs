@@ -1,5 +1,6 @@
 mod api;
 mod db;
+#[cfg(feature = "ingest")]
 mod ingest;
 
 use crate::api::{health, list_events, ApiState};
